@@ -18,6 +18,13 @@ def retrieve_context(request: RetrieveRequest, db: Session = Depends(get_db)):
     exact_match = service.deterministic_bypass(entities, request.customer_id)
     
     if exact_match:
+        # Audit Logging for Deterministic Bypass
+        service.log_audit(
+            query_id=uuid.uuid4(),
+            decision="metadata_exact_match",
+            scores={"exact_match": 1.0},
+            chunks=[str(exact_match.chunk_id)]
+        )
         return RetrieveResponse(
             query_id=uuid.uuid4(),
             router_decision="metadata_exact_match",
@@ -31,7 +38,7 @@ def retrieve_context(request: RetrieveRequest, db: Session = Depends(get_db)):
     # 4. Cross-Encoder Reranking & Graph Traversal
     reranked_results = service.rerank_and_traverse(request.query, hybrid_results)
     
-    # 5. Audit Logging
+    # 5. Audit Logging for Hybrid Search
     service.log_audit(
         query_id=uuid.uuid4(),
         decision="hybrid_search_rrf",

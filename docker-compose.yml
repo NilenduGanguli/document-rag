@@ -10,7 +10,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -24,6 +24,13 @@ services:
     volumes:
       - redis_data:/data
 
+  ocr_service:
+    build: ./ocr_service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./ocr_service:/app
+
   api:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -31,13 +38,12 @@ services:
       - .:/app
     ports:
       - "8000:8000"
-    environment:
-      - POSTGRES_SERVER=db
-      - REDIS_HOST=redis
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_started
+      ocr_service:
         condition: service_started
 
   worker:
@@ -45,13 +51,12 @@ services:
     command: celery -A app.core.celery_app worker --loglevel=info
     volumes:
       - .:/app
-    environment:
-      - POSTGRES_SERVER=db
-      - REDIS_HOST=redis
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_started
+      ocr_service:
         condition: service_started
 
 volumes:

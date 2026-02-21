@@ -2,6 +2,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.models.domain import ExtractedEntity, SemanticChildChunk, ParsedLayoutSegment, RetrievalAuditLog
 from app.schemas.retrieve import RetrievedChunk
+from app.services.nlp_service import extract_entities
+from app.services.embedding_service import embedding_service
+from app.services.reranker_service import reranker_service
 import uuid
 from typing import List, Dict, Any, Optional
 
@@ -10,16 +13,8 @@ class RetrievalService:
         self.db = db
 
     def parse_query_intent(self, query: str) -> List[Dict[str, str]]:
-        # Mock NLP parsing (e.g., spaCy)
-        # In a real scenario, this would call an NLP service
-        entities = []
-        if "Passport" in query or "passport" in query:
-            # Extract passport number using regex or NER
-            import re
-            match = re.search(r'[A-Z0-9]{5,9}', query)
-            if match:
-                entities.append({"type": "PASSPORT_NUM", "value": match.group(0)})
-        return entities
+        # Actual NLP parsing using spaCy and custom regex
+        return extract_entities(query)
 
     def deterministic_bypass(self, entities: List[Dict[str, str]], customer_id: Optional[str]) -> Optional[RetrievedChunk]:
         for entity in entities:
@@ -28,10 +23,12 @@ class RetrievalService:
                 query = text("""
                     SELECT 
                         pls.segment_id,
+                        pls.doc_id,
                         pls.raw_content,
+                        ee.entity_type,
+                        ee.entity_value,
                         scc.chunk_id,
-                        scc.text_content,
-                        ee.entity_value
+                        scc.text_content
                     FROM 
                         extracted_entity ee
                     JOIN 
@@ -56,9 +53,11 @@ class RetrievalService:
         return None
 
     def hybrid_search(self, query: str, customer_id: Optional[str], top_k: int) -> List[RetrievedChunk]:
-        # Mock embedding generation
-        # In a real scenario, this would call an embedding service
-        query_vector = [0.0] * 1024 # Placeholder for 1024-dim vector
+        # Actual embedding generation using BAAI/bge-m3
+        query_vector = embedding_service.get_embedding(query)
+        
+        # Session-Level Tuning: Adjust ef_search for this transaction
+        self.db.execute(text("SET LOCAL hnsw.ef_search = 100;"))
         
         # Execute Hybrid Search with RRF
         sql_query = text("""
@@ -67,10 +66,12 @@ class RetrievalService:
                     chunk_id,
                     segment_id,
                     text_content,
-                    dense_vector <=> :query_vector::vector AS distance,
-                    RANK() OVER (ORDER BY dense_vector <=> :query_vector::vector) AS dense_rank
+                    dense_vector <=> :query_vector::vector AS vector_distance,
+                    ROW_NUMBER() OVER (ORDER BY dense_vector <=> :query_vector::vector ASC) AS dense_rank
                 FROM 
                     semantic_child_chunk
+                ORDER BY 
+                    vector_distance ASC
                 LIMIT 60
             ),
             sparse_search AS (
@@ -78,12 +79,14 @@ class RetrievalService:
                     chunk_id,
                     segment_id,
                     text_content,
-                    ts_rank_cd(to_tsvector('english', text_content), plainto_tsquery('english', :query)) AS rank,
-                    RANK() OVER (ORDER BY ts_rank_cd(to_tsvector('english', text_content), plainto_tsquery('english', :query)) DESC) AS sparse_rank
+                    ts_rank_cd(to_tsvector('english', text_content), plainto_tsquery('english', :query)) AS sparse_score,
+                    ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', text_content), plainto_tsquery('english', :query)) DESC) AS sparse_rank
                 FROM 
                     semantic_child_chunk
                 WHERE 
                     to_tsvector('english', text_content) @@ plainto_tsquery('english', :query)
+                ORDER BY 
+                    sparse_score DESC
                 LIMIT 60
             )
             SELECT 
@@ -117,18 +120,34 @@ class RetrievalService:
         return chunks
 
     def rerank_and_traverse(self, query: str, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
-        # Mock Cross-Encoder Reranking
-        # In a real scenario, this would call a reranker model
-        for chunk in chunks:
-            chunk.score *= 0.9 # Mock reranking adjustment
+        if not chunks:
+            return []
             
-            # Graph Traversal: Fetch parent content if score is high
-            if chunk.score > 0.01: # Threshold
-                parent = self.db.query(ParsedLayoutSegment).filter(ParsedLayoutSegment.segment_id == chunk.parent_segment_id).first()
+        # Actual Cross-Encoder Reranking using BAAI/bge-reranker-v2-m3
+        texts = [chunk.text_content for chunk in chunks]
+        scores = reranker_service.rerank(query, texts)
+        
+        for chunk, score in zip(chunks, scores):
+            chunk.score = score
+            
+        # Filter by dynamic confidence threshold (e.g., > 0.5)
+        valid_chunks = [c for c in chunks if c.score > 0.5]
+        
+        # Graph Traversal Rules
+        parent_counts = {}
+        for c in valid_chunks:
+            parent_counts[c.parent_segment_id] = parent_counts.get(c.parent_segment_id, 0) + 1
+            
+        final_chunks = []
+        for c in valid_chunks:
+            # Frequency Rule: If > 2 children share parent, or Semantic Threshold Rule: score > 0.8
+            if parent_counts[c.parent_segment_id] > 2 or c.score > 0.8:
+                parent = self.db.query(ParsedLayoutSegment).filter(ParsedLayoutSegment.segment_id == c.parent_segment_id).first()
                 if parent:
-                    chunk.parent_content = parent.raw_content
-                    
-        return sorted(chunks, key=lambda x: x.score, reverse=True)
+                    c.parent_content = parent.raw_content
+            final_chunks.append(c)
+            
+        return sorted(final_chunks, key=lambda x: x.score, reverse=True)
 
     def log_audit(self, query_id: uuid.UUID, decision: str, scores: Dict[str, float], chunks: List[str]):
         audit_log = RetrievalAuditLog(

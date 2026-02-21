@@ -1,9 +1,18 @@
 from celery import shared_task
 from typing import List, Dict, Any
 from app.core.database import SessionLocal
-from app.models.domain import RawDocument, ParsedLayoutSegment, SemanticChildChunk, ExtractedEntity, KnowledgeGraphEdge, RelationshipType, EntityType
+from app.models.domain import RawDocument, ParsedLayoutSegment, SemanticChildChunk, ExtractedEntity, KnowledgeGraphEdge, RelationshipType, EntityType, FileType
+from app.utils.file_utils import download_file
+from app.services.nlp_service import extract_entities
+from app.services.embedding_service import embedding_service
+from unstructured.partition.auto import partition
+from unstructured.partition.pdf import partition_pdf
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import httpx
 import uuid
 import json
+import os
+import pandas as pd
 
 @shared_task(bind=True, max_retries=3)
 def process_kyc_document_task(self, doc_id: str, storage_uri: str):
@@ -14,58 +23,134 @@ def process_kyc_document_task(self, doc_id: str, storage_uri: str):
         if not raw_doc:
             raise ValueError(f"Document {doc_id} not found")
 
-        # 2. Layout Analysis (Mock Azure OCR / unstructured.io)
-        # In a real scenario, this would call an OCR service
-        segment_id = uuid.uuid4()
-        raw_content = {"text": "Mock extracted text from OCR", "tables": []}
-        
-        segment = ParsedLayoutSegment(
-            segment_id=segment_id,
-            doc_id=raw_doc.doc_id,
-            raw_content=raw_content
-        )
-        db.add(segment)
-        db.commit()
+        # Download file locally for processing
+        local_path = download_file(storage_uri)
 
-        # 3. Semantic Chunking (Mock)
-        # In a real scenario, this would split the text into chunks
-        chunks = [
-            {"text": "Mock chunk 1", "vector": [0.1] * 1024},
-            {"text": "Mock chunk 2", "vector": [0.2] * 1024}
-        ]
+        layout_segments = []
         
-        for chunk_data in chunks:
-            chunk_id = uuid.uuid4()
-            chunk = SemanticChildChunk(
-                chunk_id=chunk_id,
-                segment_id=segment_id,
-                text_content=chunk_data["text"],
-                dense_vector=chunk_data["vector"],
-                sparse_vector={"mock": "sparse"}
-            )
-            db.add(chunk)
-            
-            # 4. Entity Extraction (Mock NER)
-            # In a real scenario, this would call an NLP service
-            if "passport" in chunk_data["text"].lower():
-                entity = ExtractedEntity(
-                    entity_id=uuid.uuid4(),
-                    chunk_id=chunk_id,
-                    entity_type=EntityType.PASSPORT_NUM,
-                    entity_value="A1234"
+        # 2. Layout Analysis
+        if raw_doc.file_type in [FileType.PNG, FileType.JPEG]:
+            # Call LLM OCR Service
+            with open(local_path, "rb") as f:
+                # Assuming ocr_service is running on port 8001 in docker network
+                ocr_url = os.getenv("OCR_SERVICE_URL", "http://ocr_service:8001/ocr")
+                response = httpx.post(ocr_url, files={"file": f}, timeout=120.0)
+                response.raise_for_status()
+                ocr_result = response.json()
+                layout_segments.append({
+                    "type": "Image", 
+                    "content": ocr_result["text"],
+                    "raw_text": ocr_result["text"]
+                })
+        elif raw_doc.file_type == FileType.XLSX:
+            # Native Data (XLSX) parsed via native libraries directly into structured JSON
+            df_dict = pd.read_excel(local_path, sheet_name=None)
+            for sheet_name, df in df_dict.items():
+                json_data = df.to_dict(orient="records")
+                # Create a text representation for vector search
+                text_repr = "\n".join([", ".join([f"{k}: {v}" for k, v in row.items()]) for row in json_data])
+                layout_segments.append({
+                    "type": "JSON", 
+                    "content": json_data, 
+                    "raw_text": text_repr,
+                    "metadata": {"sheet": sheet_name}
+                })
+        else:
+            # Use unstructured for PDF/DOCX
+            if raw_doc.file_type == FileType.PDF:
+                elements = partition_pdf(
+                    filename=local_path,
+                    strategy="hi_res", # Use high resolution strategy for OCR
+                    infer_table_structure=True,
+                    extract_images_in_pdf=True,
+                    extract_image_block_types=["Image", "Table"]
                 )
-                db.add(entity)
+            else:
+                elements = partition(filename=local_path)
                 
-            # 5. Knowledge Graph Edges (Mock)
-            edge = KnowledgeGraphEdge(
-                edge_id=uuid.uuid4(),
-                source_node=chunk_id,
-                target_node=segment_id,
-                relationship_type=RelationshipType.CHILD_OF
+            current_segment = []
+            current_title = "Document Start"
+            
+            for el in elements:
+                if el.category == "Title":
+                    if current_segment:
+                        layout_segments.append({
+                            "type": "Text", 
+                            "content": "\n".join(current_segment),
+                            "raw_text": "\n".join(current_segment),
+                            "metadata": {"section": current_title}
+                        })
+                        current_segment = []
+                    current_title = str(el)
+                elif el.category == "Table":
+                    if current_segment:
+                        layout_segments.append({
+                            "type": "Text", 
+                            "content": "\n".join(current_segment),
+                            "raw_text": "\n".join(current_segment),
+                            "metadata": {"section": current_title}
+                        })
+                        current_segment = []
+                    
+                    # Embedded tables explicitly extracted and converted to Markdown or HTML
+                    html_table = el.metadata.text_as_html if hasattr(el, 'metadata') and hasattr(el.metadata, 'text_as_html') and el.metadata.text_as_html else str(el)
+                    layout_segments.append({
+                        "type": "Table",
+                        "content": html_table,
+                        "raw_text": str(el), # Raw text for child chunking
+                        "metadata": {"section": current_title, "format": "html"}
+                    })
+                else:
+                    current_segment.append(str(el))
+                    
+            if current_segment:
+                layout_segments.append({
+                    "type": "Text", 
+                    "content": "\n".join(current_segment),
+                    "raw_text": "\n".join(current_segment),
+                    "metadata": {"section": current_title}
+                })
+
+        # Clean up local file
+        if local_path != storage_uri and os.path.exists(local_path):
+            os.remove(local_path)
+
+        # 3. Semantic Chunking
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        child_chunks_data = []
+
+        for segment_data in layout_segments:
+            segment_id = uuid.uuid4()
+            
+            # Parent Node: represents broader document sections, tables, or raw image URIs
+            segment = ParsedLayoutSegment(
+                segment_id=segment_id,
+                doc_id=raw_doc.doc_id,
+                raw_content=segment_data
             )
-            db.add(edge)
+            db.add(segment)
+            
+            # Child Nodes: highly granular, descriptive text optimized for vector search
+            text_to_chunk = segment_data.get("raw_text", "")
+            if not text_to_chunk:
+                continue
+                
+            chunks = text_splitter.split_text(text_to_chunk)
+            
+            for chunk_text in chunks:
+                chunk_id = uuid.uuid4()
+                child_chunks_data.append({
+                    "chunk_id": str(chunk_id),
+                    "segment_id": str(segment_id),
+                    "text": chunk_text
+                })
 
         db.commit()
+        
+        # 4. Route to Batch Embedding
+        if child_chunks_data:
+            batch_embed_and_store.delay(child_chunks_data)
+
         return {"status": "success", "doc_id": doc_id}
 
     except Exception as exc:
@@ -76,19 +161,56 @@ def process_kyc_document_task(self, doc_id: str, storage_uri: str):
 
 @shared_task
 def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
-    # Mock batch embedding
-    # In a real scenario, this would call an embedding service
     db = SessionLocal()
     try:
-        for chunk_data in child_chunks:
+        # 1. Isolate text for batch embedding
+        texts_to_embed = [chunk["text"] for chunk in child_chunks]
+        
+        # 2. Call the embedding model in one batch
+        embeddings = embedding_service.get_embeddings(texts_to_embed)
+        
+        for chunk_data, embedding in zip(child_chunks, embeddings):
+            chunk_id = uuid.UUID(chunk_data["chunk_id"])
+            segment_id = uuid.UUID(chunk_data["segment_id"])
+            
+            # 3. Insert into pgvector
             chunk = SemanticChildChunk(
-                chunk_id=uuid.UUID(chunk_data["chunk_id"]),
-                segment_id=uuid.UUID(chunk_data["segment_id"]),
+                chunk_id=chunk_id,
+                segment_id=segment_id,
                 text_content=chunk_data["text"],
-                dense_vector=[0.1] * 1024, # Mock vector
-                sparse_vector={"mock": "sparse"}
+                dense_vector=embedding,
+                sparse_vector={}
             )
             db.add(chunk)
+            
+            # 4. Entity Extraction (NER)
+            entities = extract_entities(chunk_data["text"])
+            for ent in entities:
+                ent_type = EntityType.PERSON
+                if ent["type"] == "PASSPORT_NUM":
+                    ent_type = EntityType.PASSPORT_NUM
+                elif ent["type"] == "ORG":
+                    ent_type = EntityType.ORG
+                elif ent["type"] == "DATE":
+                    ent_type = EntityType.DATE
+                    
+                entity = ExtractedEntity(
+                    entity_id=uuid.uuid4(),
+                    chunk_id=chunk_id,
+                    entity_type=ent_type,
+                    entity_value=ent["value"]
+                )
+                db.add(entity)
+                
+            # 5. Knowledge Graph Edges
+            edge = KnowledgeGraphEdge(
+                edge_id=uuid.uuid4(),
+                source_node=chunk_id,
+                target_node=segment_id,
+                relationship_type=RelationshipType.CHILD_OF
+            )
+            db.add(edge)
+
         db.commit()
     except Exception as exc:
         db.rollback()
