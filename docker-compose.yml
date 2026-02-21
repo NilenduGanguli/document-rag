@@ -60,5 +60,4 @@ services:
         condition: service_started
 
 volumes:
-  postgres_data:
   redis_data:
