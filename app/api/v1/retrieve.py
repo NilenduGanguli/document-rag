@@ -4,11 +4,27 @@ from app.core.database import get_db
 from app.schemas.retrieve import RetrieveRequest, RetrieveResponse
 from app.services.retrieval_service import RetrievalService
 import uuid
+import hashlib
+import redis
+import json
+from app.core.config import settings
 
 router = APIRouter()
 
+# Initialize Redis client for Semantic Caching
+redis_client = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=2, decode_responses=True)
+
 @router.post("/retrieve", response_model=RetrieveResponse)
 def retrieve_context(request: RetrieveRequest, db: Session = Depends(get_db)):
+    # Semantic Cache Check
+    cache_key = f"query:{hashlib.sha256(f'{request.query}_{request.customer_id}_{request.top_k}'.encode()).hexdigest()}"
+    try:
+        cached_result = redis_client.get(cache_key)
+        if cached_result:
+            return RetrieveResponse.model_validate_json(cached_result)
+    except redis.RedisError:
+        pass # Fallback to DB if Redis is down
+
     service = RetrievalService(db)
     
     # 1. Query Intent & NER Parsing
@@ -25,12 +41,17 @@ def retrieve_context(request: RetrieveRequest, db: Session = Depends(get_db)):
             scores={"exact_match": 1.0},
             chunks=[str(exact_match.chunk_id)]
         )
-        return RetrieveResponse(
+        response = RetrieveResponse(
             query_id=uuid.uuid4(),
             router_decision="metadata_exact_match",
             retrieved_chunks=[exact_match],
             confidence_scores={"exact_match": 1.0}
         )
+        try:
+            redis_client.setex(cache_key, 3600, response.model_dump_json())
+        except redis.RedisError:
+            pass
+        return response
     
     # 3. Hybrid Search (Dense + Sparse RRF)
     hybrid_results = service.hybrid_search(request.query, request.customer_id, request.top_k)
@@ -46,9 +67,16 @@ def retrieve_context(request: RetrieveRequest, db: Session = Depends(get_db)):
         chunks=[str(r.chunk_id) for r in reranked_results]
     )
     
-    return RetrieveResponse(
+    response = RetrieveResponse(
         query_id=uuid.uuid4(),
         router_decision="hybrid_search_rrf",
         retrieved_chunks=reranked_results,
         confidence_scores={"reranker_avg": sum(r.score for r in reranked_results) / len(reranked_results) if reranked_results else 0}
     )
+    
+    try:
+        redis_client.setex(cache_key, 3600, response.model_dump_json())
+    except redis.RedisError:
+        pass
+        
+    return response

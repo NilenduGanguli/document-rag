@@ -1,7 +1,13 @@
 from fastapi import FastAPI
+from sqlalchemy import text
 from app.api.v1 import ingest, retrieve
 from app.core.config import settings
 from app.core.database import engine, Base
+
+# Create pgvector extension before creating tables
+with engine.connect() as conn:
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+    conn.commit()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)

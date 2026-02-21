@@ -159,6 +159,8 @@ def process_kyc_document_task(self, doc_id: str, storage_uri: str):
     finally:
         db.close()
 
+from sqlalchemy.dialects.postgresql import insert
+
 @shared_task
 def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
     db = SessionLocal()
@@ -169,19 +171,21 @@ def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
         # 2. Call the embedding model in one batch
         embeddings = embedding_service.get_embeddings(texts_to_embed)
         
+        chunk_values = []
+        entity_values = []
+        edge_values = []
+
         for chunk_data, embedding in zip(child_chunks, embeddings):
             chunk_id = uuid.UUID(chunk_data["chunk_id"])
             segment_id = uuid.UUID(chunk_data["segment_id"])
             
-            # 3. Insert into pgvector
-            chunk = SemanticChildChunk(
-                chunk_id=chunk_id,
-                segment_id=segment_id,
-                text_content=chunk_data["text"],
-                dense_vector=embedding,
-                sparse_vector={}
-            )
-            db.add(chunk)
+            chunk_values.append({
+                "chunk_id": chunk_id,
+                "segment_id": segment_id,
+                "text_content": chunk_data["text"],
+                "dense_vector": embedding,
+                "sparse_vector": {}
+            })
             
             # 4. Entity Extraction (NER)
             entities = extract_entities(chunk_data["text"])
@@ -194,22 +198,46 @@ def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
                 elif ent["type"] == "DATE":
                     ent_type = EntityType.DATE
                     
-                entity = ExtractedEntity(
-                    entity_id=uuid.uuid4(),
-                    chunk_id=chunk_id,
-                    entity_type=ent_type,
-                    entity_value=ent["value"]
-                )
-                db.add(entity)
+                # Deterministic UUID for idempotency
+                ent_uuid = uuid.uuid5(chunk_id, f"{ent_type}_{ent['value']}")
+                entity_values.append({
+                    "entity_id": ent_uuid,
+                    "chunk_id": chunk_id,
+                    "entity_type": ent_type,
+                    "entity_value": ent["value"]
+                })
                 
             # 5. Knowledge Graph Edges
-            edge = KnowledgeGraphEdge(
-                edge_id=uuid.uuid4(),
-                source_node=chunk_id,
-                target_node=segment_id,
-                relationship_type=RelationshipType.CHILD_OF
+            # Deterministic UUID for idempotency
+            edge_uuid = uuid.uuid5(chunk_id, f"CHILD_OF_{segment_id}")
+            edge_values.append({
+                "edge_id": edge_uuid,
+                "source_node": chunk_id,
+                "target_node": segment_id,
+                "relationship_type": RelationshipType.CHILD_OF
+            })
+
+        # 3. Bulk Insert into pgvector with ON CONFLICT DO UPDATE
+        if chunk_values:
+            stmt = insert(SemanticChildChunk).values(chunk_values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=['chunk_id'],
+                set_={
+                    'text_content': stmt.excluded.text_content,
+                    'dense_vector': stmt.excluded.dense_vector
+                }
             )
-            db.add(edge)
+            db.execute(stmt)
+
+        if entity_values:
+            stmt_ent = insert(ExtractedEntity).values(entity_values)
+            stmt_ent = stmt_ent.on_conflict_do_nothing(index_elements=['entity_id'])
+            db.execute(stmt_ent)
+
+        if edge_values:
+            stmt_edge = insert(KnowledgeGraphEdge).values(edge_values)
+            stmt_edge = stmt_edge.on_conflict_do_nothing(index_elements=['edge_id'])
+            db.execute(stmt_edge)
 
         db.commit()
     except Exception as exc:

@@ -35,12 +35,15 @@ class RetrievalService:
                         semantic_child_chunk scc ON ee.chunk_id = scc.chunk_id
                     JOIN 
                         parsed_layout_segment pls ON scc.segment_id = pls.segment_id
+                    JOIN 
+                        raw_document rd ON pls.doc_id = rd.doc_id
                     WHERE 
                         ee.entity_type = 'PASSPORT_NUM' 
                         AND ee.entity_value = :entity_value
+                        AND (:customer_id IS NULL OR rd.customer_id = :customer_id)
                     LIMIT 1;
                 """)
-                result = self.db.execute(query, {"entity_value": entity["value"]}).fetchone()
+                result = self.db.execute(query, {"entity_value": entity["value"], "customer_id": customer_id}).fetchone()
                 
                 if result:
                     return RetrievedChunk(
@@ -63,28 +66,39 @@ class RetrievalService:
         sql_query = text("""
             WITH dense_search AS (
                 SELECT 
-                    chunk_id,
-                    segment_id,
-                    text_content,
-                    dense_vector <=> :query_vector::vector AS vector_distance,
-                    ROW_NUMBER() OVER (ORDER BY dense_vector <=> :query_vector::vector ASC) AS dense_rank
+                    scc.chunk_id,
+                    scc.segment_id,
+                    scc.text_content,
+                    scc.dense_vector <=> :query_vector::vector AS vector_distance,
+                    ROW_NUMBER() OVER (ORDER BY scc.dense_vector <=> :query_vector::vector ASC) AS dense_rank
                 FROM 
-                    semantic_child_chunk
+                    semantic_child_chunk scc
+                WHERE 
+                    (:customer_id IS NULL OR EXISTS (
+                        SELECT 1 FROM parsed_layout_segment pls 
+                        JOIN raw_document rd ON pls.doc_id = rd.doc_id 
+                        WHERE pls.segment_id = scc.segment_id AND rd.customer_id = :customer_id
+                    ))
                 ORDER BY 
                     vector_distance ASC
                 LIMIT 60
             ),
             sparse_search AS (
                 SELECT 
-                    chunk_id,
-                    segment_id,
-                    text_content,
-                    ts_rank_cd(to_tsvector('english', text_content), plainto_tsquery('english', :query)) AS sparse_score,
-                    ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', text_content), plainto_tsquery('english', :query)) DESC) AS sparse_rank
+                    scc.chunk_id,
+                    scc.segment_id,
+                    scc.text_content,
+                    ts_rank_cd(to_tsvector('english', scc.text_content), plainto_tsquery('english', :query)) AS sparse_score,
+                    ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', scc.text_content), plainto_tsquery('english', :query)) DESC) AS sparse_rank
                 FROM 
-                    semantic_child_chunk
+                    semantic_child_chunk scc
                 WHERE 
-                    to_tsvector('english', text_content) @@ plainto_tsquery('english', :query)
+                    to_tsvector('english', scc.text_content) @@ plainto_tsquery('english', :query)
+                    AND (:customer_id IS NULL OR EXISTS (
+                        SELECT 1 FROM parsed_layout_segment pls 
+                        JOIN raw_document rd ON pls.doc_id = rd.doc_id 
+                        WHERE pls.segment_id = scc.segment_id AND rd.customer_id = :customer_id
+                    ))
                 ORDER BY 
                     sparse_score DESC
                 LIMIT 60
@@ -106,6 +120,7 @@ class RetrievalService:
         results = self.db.execute(sql_query, {
             "query_vector": str(query_vector),
             "query": query,
+            "customer_id": customer_id,
             "top_k": top_k
         }).fetchall()
         
@@ -139,13 +154,26 @@ class RetrievalService:
             parent_counts[c.parent_segment_id] = parent_counts.get(c.parent_segment_id, 0) + 1
             
         final_chunks = []
+        processed_parents = set()
+        
         for c in valid_chunks:
             # Frequency Rule: If > 2 children share parent, or Semantic Threshold Rule: score > 0.8
             if parent_counts[c.parent_segment_id] > 2 or c.score > 0.8:
-                parent = self.db.query(ParsedLayoutSegment).filter(ParsedLayoutSegment.segment_id == c.parent_segment_id).first()
-                if parent:
-                    c.parent_content = parent.raw_content
-            final_chunks.append(c)
+                if c.parent_segment_id not in processed_parents:
+                    parent = self.db.query(ParsedLayoutSegment).filter(ParsedLayoutSegment.segment_id == c.parent_segment_id).first()
+                    if parent:
+                        # Drop children, retrieve broader Parent block
+                        final_chunks.append(RetrievedChunk(
+                            chunk_id=c.chunk_id, # Using the highest scoring child's ID as reference
+                            text_content="[PARENT BLOCK RETRIEVED]",
+                            score=c.score,
+                            parent_segment_id=c.parent_segment_id,
+                            parent_content=parent.raw_content
+                        ))
+                        processed_parents.add(c.parent_segment_id)
+            else:
+                if c.parent_segment_id not in processed_parents:
+                    final_chunks.append(c)
             
         return sorted(final_chunks, key=lambda x: x.score, reverse=True)
 

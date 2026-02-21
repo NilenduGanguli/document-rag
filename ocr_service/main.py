@@ -1,13 +1,18 @@
 from fastapi import FastAPI, UploadFile, File
 from transformers import AutoProcessor, AutoModelForCausalLM
+import transformers.dynamic_module_utils as dmu
 from PIL import Image
 import io
 import torch
+import os
 
 app = FastAPI(title="LLM OCR Service")
 
 model_id = "microsoft/Florence-2-base"
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Bypass flash_attn requirement for Florence-2 on CPU/environments without flash_attn
+dmu.check_imports = lambda filename: []
 
 # Load model and processor
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)

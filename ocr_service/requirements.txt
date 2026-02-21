@@ -7,3 +7,4 @@ torchvision==0.17.1
 Pillow==10.2.0
 einops==0.7.0
 timm==0.9.16
+numpy<2.0.0

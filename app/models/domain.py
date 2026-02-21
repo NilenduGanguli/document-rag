@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Text, Enum, ForeignKey, JSON, Float, Integer
+from sqlalchemy import Column, String, Text, Enum, ForeignKey, JSON, Float, Integer, Index, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -58,15 +58,38 @@ class SemanticChildChunk(Base):
     segment = relationship("ParsedLayoutSegment", back_populates="chunks")
     entities = relationship("ExtractedEntity", back_populates="chunk")
 
+    __table_args__ = (
+        Index(
+            'idx_semantic_child_vector',
+            'dense_vector',
+            postgresql_using='hnsw',
+            postgresql_with={'m': 24, 'ef_construction': 100},
+            postgresql_ops={'dense_vector': 'vector_cosine_ops'}
+        ),
+        Index(
+            'idx_semantic_child_text_gin',
+            text("to_tsvector('english', text_content)"),
+            postgresql_using='gin'
+        ),
+    )
+
 class ExtractedEntity(Base):
     __tablename__ = "extracted_entity"
     
     entity_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     chunk_id = Column(UUID(as_uuid=True), ForeignKey("semantic_child_chunk.chunk_id"), nullable=False)
     entity_type = Column(Enum(EntityType), nullable=False)
-    entity_value = Column(String, index=True, nullable=False) # Hash index
+    entity_value = Column(String, nullable=False) # Hash index
     
     chunk = relationship("SemanticChildChunk", back_populates="entities")
+
+    __table_args__ = (
+        Index(
+            'idx_extracted_entity_value_hash',
+            'entity_value',
+            postgresql_using='hash'
+        ),
+    )
 
 class KnowledgeGraphEdge(Base):
     __tablename__ = "knowledge_graph_edge"
