@@ -24,10 +24,29 @@ services:
     volumes:
       - redis_data:/data
 
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   ocr_service:
     build: ./ocr_service
     ports:
       - "8001:8001"
+    env_file:
+      - ./ocr_service/.env
     volumes:
       - ./ocr_service:/app
 
@@ -36,28 +55,68 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - .:/app
+      - shared_data:/shared
     ports:
       - "8000:8000"
+    environment:
+      - POSTGRES_SERVER=db
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+      minio:
+        condition: service_healthy
       ocr_service:
         condition: service_started
 
   worker:
     build: .
-    command: celery -A app.core.celery_app worker --loglevel=info
+    command: celery -A app.core.celery_app worker --loglevel=info -Q main-queue
     volumes:
       - .:/app
+      - shared_data:/shared
+    environment:
+      - POSTGRES_SERVER=db
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+      minio:
+        condition: service_healthy
       ocr_service:
         condition: service_started
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=kyc_rag
+      - POSTGRES_SERVER=db
+      - POSTGRES_PORT=5432
+      - API_URL=http://api:8000/api/v1
+    volumes:
+      - ./frontend:/app
+      - shared_data:/shared
+    depends_on:
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+
 volumes:
   redis_data:
+  shared_data:
+  minio_data:

@@ -10,6 +10,7 @@ echo "Exporting environment variables for OCR Service..."
 # OCR Service Configuration
 export PORT="8001"
 export HOST="0.0.0.0"
+export OPENAI_API_KEY="${OPENAI_API_KEY}"
 
 # Execute the main container command (CMD)
 exec "$@"

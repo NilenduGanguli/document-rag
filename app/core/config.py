@@ -27,8 +27,15 @@ class Settings(BaseSettings):
     @property
     def CELERY_RESULT_BACKEND(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/1"
-    
-    # Azure OCR
+
+    # MinIO / S3
+    MINIO_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "kyc-documents"
+    MINIO_SECURE: bool = False
+
+    # Azure OCR (legacy)
     AZURE_FORM_RECOGNIZER_ENDPOINT: Optional[str] = None
     AZURE_FORM_RECOGNIZER_KEY: Optional[str] = None
     

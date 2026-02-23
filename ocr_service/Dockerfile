@@ -8,5 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chmod +x /app/set-env.sh
 
+ENV OPENAI_API_KEY="${OPENAI_API_KEY}"
+
 ENTRYPOINT ["/app/set-env.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]

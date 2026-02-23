@@ -3,8 +3,14 @@ from typing import List
 
 class RerankerService:
     def __init__(self):
-        # BAAI/bge-reranker-v2-m3 is a cross-encoder model for reranking
-        self.model = CrossEncoder('BAAI/bge-reranker-v2-m3')
+        self._model = None
+
+    @property
+    def model(self) -> CrossEncoder:
+        if self._model is None:
+            # BAAI/bge-reranker-v2-m3 is a cross-encoder model for reranking
+            self._model = CrossEncoder('BAAI/bge-reranker-v2-m3')
+        return self._model
 
     def rerank(self, query: str, texts: List[str]) -> List[float]:
         """

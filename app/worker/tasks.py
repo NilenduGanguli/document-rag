@@ -1,4 +1,5 @@
-from celery import shared_task
+from celery import shared_task  # noqa: F401
+from app.core.celery_app import celery_app
 from typing import List, Dict, Any
 from app.core.database import SessionLocal
 from app.models.domain import RawDocument, ParsedLayoutSegment, SemanticChildChunk, ExtractedEntity, KnowledgeGraphEdge, RelationshipType, EntityType, FileType
@@ -14,7 +15,7 @@ import json
 import os
 import pandas as pd
 
-@shared_task(bind=True, max_retries=3)
+@celery_app.task(bind=True, max_retries=3)
 def process_kyc_document_task(self, doc_id: str, storage_uri: str):
     db = SessionLocal()
     try:
@@ -161,7 +162,7 @@ def process_kyc_document_task(self, doc_id: str, storage_uri: str):
 
 from sqlalchemy.dialects.postgresql import insert
 
-@shared_task
+@celery_app.task
 def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
     db = SessionLocal()
     try:
@@ -174,6 +175,15 @@ def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
         chunk_values = []
         entity_values = []
         edge_values = []
+
+        _entity_type_map = {
+            "PERSON": EntityType.PERSON,
+            "ORG": EntityType.ORG,
+            "DATE": EntityType.DATE,
+            "PASSPORT_NUM": EntityType.PASSPORT_NUM,
+            "GPE": EntityType.ADDRESS,
+            "ADDRESS": EntityType.ADDRESS,
+        }
 
         for chunk_data, embedding in zip(child_chunks, embeddings):
             chunk_id = uuid.UUID(chunk_data["chunk_id"])
@@ -190,13 +200,9 @@ def batch_embed_and_store(child_chunks: List[Dict[str, Any]]):
             # 4. Entity Extraction (NER)
             entities = extract_entities(chunk_data["text"])
             for ent in entities:
-                ent_type = EntityType.PERSON
-                if ent["type"] == "PASSPORT_NUM":
-                    ent_type = EntityType.PASSPORT_NUM
-                elif ent["type"] == "ORG":
-                    ent_type = EntityType.ORG
-                elif ent["type"] == "DATE":
-                    ent_type = EntityType.DATE
+                ent_type = _entity_type_map.get(ent["type"])
+                if ent_type is None:
+                    continue  # skip unrecognized entity types
                     
                 # Deterministic UUID for idempotency
                 ent_uuid = uuid.uuid5(chunk_id, f"{ent_type}_{ent['value']}")

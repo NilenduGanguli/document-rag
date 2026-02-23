@@ -69,8 +69,8 @@ class RetrievalService:
                     scc.chunk_id,
                     scc.segment_id,
                     scc.text_content,
-                    scc.dense_vector <=> :query_vector::vector AS vector_distance,
-                    ROW_NUMBER() OVER (ORDER BY scc.dense_vector <=> :query_vector::vector ASC) AS dense_rank
+                    scc.dense_vector <=> CAST(:query_vector AS vector) AS vector_distance,
+                    ROW_NUMBER() OVER (ORDER BY scc.dense_vector <=> CAST(:query_vector AS vector) ASC) AS dense_rank
                 FROM 
                     semantic_child_chunk scc
                 WHERE 

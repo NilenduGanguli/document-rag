@@ -3,8 +3,14 @@ from typing import List
 
 class EmbeddingService:
     def __init__(self):
-        # BAAI/bge-m3 is a 1024-dimensional embedding model
-        self.model = SentenceTransformer('BAAI/bge-m3')
+        self._model = None
+
+    @property
+    def model(self) -> SentenceTransformer:
+        if self._model is None:
+            # BAAI/bge-m3 is a 1024-dimensional embedding model
+            self._model = SentenceTransformer('BAAI/bge-m3')
+        return self._model
 
     def get_embedding(self, text: str) -> List[float]:
         """
