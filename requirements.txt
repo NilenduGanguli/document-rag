@@ -7,15 +7,43 @@ psycopg2-binary==2.9.9
 pgvector==0.2.5
 pydantic==2.6.3
 pydantic-settings==2.2.1
+
+# NLP — en_core_web_lg downloaded in Dockerfile via: python -m spacy download en_core_web_lg
 spacy==3.7.4
+gliner==0.2.7
+
+# Embeddings & Reranking
 sentence-transformers>=3.0.0
+fastembed==0.3.1
+
+# Document Parsing
 unstructured==0.12.5
 unstructured[pdf]==0.12.5
 pdfminer.six==20221105
+python-docx==1.1.0
+
+# Resilience & Validation
+tenacity==8.3.0
+python-magic==0.4.27
+# Tesseract OCR fallback (requires tesseract-ocr system package in container)
+pytesseract==0.3.13
+Pillow==10.3.0
+
+# Entity canonicalization / fuzzy matching
+rapidfuzz==3.9.3
+
+# API / Infra
 python-multipart==0.0.9
 httpx==0.27.0
 alembic==1.13.1
+
+# Chunking
 langchain-text-splitters==0.0.1
+
+# Azure OCR (optional — used when DEFAULT_OCR_PROVIDER=azure_form_recognizer)
+azure-ai-formrecognizer==3.3.2
+
+# Data
 pandas==2.2.1
 openpyxl==3.1.2
 boto3==1.34.69
