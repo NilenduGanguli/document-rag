@@ -1,0 +1,9 @@
+# All kyc-rag resources live in this namespace.
+# kubectl apply -f k8s/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyc-rag
+  labels:
+    app.kubernetes.io/name: kyc-rag
+    app.kubernetes.io/part-of: kyc-rag

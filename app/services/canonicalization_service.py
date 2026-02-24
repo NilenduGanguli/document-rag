@@ -202,7 +202,7 @@ def canonicalize_entities_task(doc_id: str):
                         "source_node": id_list[i],
                         "target_node": id_list[j],
                         "relationship_type": RelationshipType.SAME_ENTITY,
-                        "metadata": {"canonical_id": str(canonical_id)},
+                        "edge_metadata": {"canonical_id": str(canonical_id)},
                     })
 
         if new_edges:

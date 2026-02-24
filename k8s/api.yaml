@@ -1,0 +1,229 @@
+# API — FastAPI + uvicorn.  Loads BGE embedding/reranker models on startup.
+#
+# Model caching strategy:
+#   An init-container pre-downloads models into an emptyDir volume before the
+#   main container starts.  emptyDir persists for the pod's lifetime; restarts
+#   re-download (~3 GB, a few minutes).
+#
+#   For production at scale, bake models into the Docker image via the Dockerfile
+#   (add: RUN python -c "from fastembed import TextEmbedding; TextEmbedding(...)")
+#   to eliminate the per-pod download entirely.
+#
+# Resource allocation (per replica):
+#   BGE-M3 ONNX (dense):    ~570 MB
+#   BGE-reranker-v2-m3:     ~570 MB
+#   SPLADE:                 ~300 MB
+#   spaCy en_core_web_sm:    ~50 MB
+#   Python/FastAPI overhead: ~600 MB
+#   Working set:             ~1 GB
+#   Total:                  ~3.1 GB → request 4Gi, limit 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: kyc-rag
+  labels:
+    app: api
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: kyc-rag
+  labels:
+    app: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0       # zero-downtime rolling deploy
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # Spread replicas across different nodes for HA
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: api
+                topologyKey: kubernetes.io/hostname
+
+      # ── Init container: pre-warm model cache ──────────────────────────────
+      initContainers:
+        - name: model-warmup
+          image: ghcr.io/YOUR_ORG/kyc-rag-api:latest
+          imagePullPolicy: Always
+          command:
+            - python
+            - -c
+            - |
+              print("Warming model cache…")
+              from fastembed import TextEmbedding
+              from fastembed.rerank.cross_encoder import TextCrossEncoder
+              TextEmbedding("BAAI/bge-m3")
+              TextEmbedding("prithivida/Splade_PP_en_v1")
+              TextCrossEncoder("BAAI/bge-reranker-v2-m3")
+              print("Model cache ready.")
+          env:
+            - name: FASTEMBED_CACHE_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: FASTEMBED_CACHE_PATH
+            - name: HF_HOME
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: HF_HOME
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+
+      # ── Main container ────────────────────────────────────────────────────
+      containers:
+        - name: api
+          image: ghcr.io/YOUR_ORG/kyc-rag-api:latest
+          imagePullPolicy: Always
+          command:
+            - uvicorn
+            - app.main:app
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --workers
+            - "2"
+            - --timeout-keep-alive
+            - "75"
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: kyc-rag-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: POSTGRES_PASSWORD
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: MINIO_SECRET_KEY
+            - name: AZURE_FORM_RECOGNIZER_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: AZURE_FORM_RECOGNIZER_ENDPOINT
+            - name: AZURE_FORM_RECOGNIZER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: AZURE_FORM_RECOGNIZER_KEY
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "5Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            # Give the embedding model time to load before first liveness check
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 4Gi
+
+      # Allow init + main container time to finish model download before eviction
+      terminationGracePeriodSeconds: 60
+---
+# Horizontal Pod Autoscaler: scale api replicas 2–5 based on CPU.
+# For request-rate-based autoscaling, add KEDA with a Redis queue metric.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+  namespace: kyc-rag
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

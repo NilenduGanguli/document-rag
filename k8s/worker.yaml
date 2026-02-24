@@ -1,0 +1,204 @@
+# Celery Worker — CPU-heavy: PDF parsing, OCR co-ordination, embedding, NLP.
+#
+# Concurrency: --concurrency=2 per pod (CPU-bound tasks; more than 2 per pod
+# will compete for CPU and slow each task).  Scale out pods via HPA instead.
+#
+# Resource allocation (per replica):
+#   Same model set as the API pod, plus active PDF processing headroom.
+#   BGE-M3 + reranker + SPLADE: ~1.5 GB
+#   spaCy / GLiNER:              ~0.6 GB
+#   PDF/image processing:        ~1 GB peak per active task × 2 workers
+#   Total:                       ~5.1 GB → request 4Gi, limit 7Gi
+#   CPU:                         request 2, limit 4 (2 tasks × 2 cores each)
+#
+# Scaling recommendation:
+#   Start at 3 replicas (6 concurrent procesing slots).
+#   HPA scales to 10 on CPU > 70 % (provides 20 concurrent slots at peak).
+#   For queue-depth autoscaling, deploy KEDA with a Redis scaler.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: kyc-rag
+  labels:
+    app: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 80
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: worker
+                topologyKey: kubernetes.io/hostname
+
+      # ── Init container: pre-warm model cache ──────────────────────────────
+      initContainers:
+        - name: model-warmup
+          image: ghcr.io/YOUR_ORG/kyc-rag-worker:latest
+          imagePullPolicy: Always
+          command:
+            - python
+            - -c
+            - |
+              print("Warming model cache…")
+              from fastembed import TextEmbedding
+              from fastembed.rerank.cross_encoder import TextCrossEncoder
+              TextEmbedding("BAAI/bge-m3")
+              TextEmbedding("prithivida/Splade_PP_en_v1")
+              TextCrossEncoder("BAAI/bge-reranker-v2-m3")
+              print("Model cache ready.")
+          env:
+            - name: FASTEMBED_CACHE_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: FASTEMBED_CACHE_PATH
+            - name: HF_HOME
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: HF_HOME
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+
+      # ── Main container ────────────────────────────────────────────────────
+      containers:
+        - name: worker
+          image: ghcr.io/YOUR_ORG/kyc-rag-worker:latest
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - app.core.celery_app
+            - worker
+            - --loglevel=info
+            - -Q
+            - main-queue
+            - --concurrency=2
+            - --max-tasks-per-child=50   # recycle workers to avoid memory leaks
+          envFrom:
+            - configMapRef:
+                name: kyc-rag-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: POSTGRES_PASSWORD
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: MINIO_SECRET_KEY
+            - name: AZURE_FORM_RECOGNIZER_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: AZURE_FORM_RECOGNIZER_ENDPOINT
+            - name: AZURE_FORM_RECOGNIZER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: AZURE_FORM_RECOGNIZER_KEY
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "7Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+          # Workers are long-running; liveness checks celery heartbeat via redis.
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.core.celery_app
+                - inspect
+                - ping
+                - --timeout=5
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3
+
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 4Gi
+
+      terminationGracePeriodSeconds: 120    # allow active tasks to finish
+---
+# HPA: scale workers 3–10 pods based on CPU.
+# For queue-depth scaling, use KEDA (https://keda.sh) with a Redis list scaler.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker-hpa
+  namespace: kyc-rag
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60       # add up to 2 pods per minute under load
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120      # remove pods slowly to let active tasks finish

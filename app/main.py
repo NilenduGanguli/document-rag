@@ -6,6 +6,7 @@ import asyncio
 from app.api.v1 import ingest, retrieve
 from app.core.config import settings
 from app.core.database import engine, Base
+from app.core.migrations import run_startup_migrations
 from app.services.embedding_service import embedding_service
 
 # Create pgvector extension before creating tables
@@ -13,8 +14,12 @@ with engine.connect() as conn:
     conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
     conn.commit()
 
-# Create database tables
+# Create any tables that don't exist yet (fresh database)
 Base.metadata.create_all(bind=engine)
+
+# Apply incremental DDL (new columns / enum values) to pre-existing tables.
+# This is idempotent and safe to run on every startup.
+run_startup_migrations(engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

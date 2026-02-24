@@ -1,6 +1,13 @@
-version: '3.8'
+# Production-ready docker-compose.
+# No local volume bind-mounts — images are self-contained and built by CI/CD.
+# Resource limits are set via the deploy.resources block (Compose Spec / Docker CE 20+).
+# For local quick start: docker compose up -d
+# For production: use the k8s/ manifests.
 
 services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────────────
+
   db:
     image: ankane/pgvector:v0.5.1
     environment:
@@ -10,19 +17,38 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./db-data:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
 
   redis:
     image: redis:7-alpine
+    command: redis-server --maxmemory 400mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
 
   minio:
     image: minio/minio:latest
@@ -40,39 +66,69 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+
+  # ── OCR Service ───────────────────────────────────────────────────────────────
 
   ocr_service:
     build: ./ocr_service
     ports:
       - "8001:8001"
+    environment:
+      # Override any defaults from the OCR service; sensitive keys via .env or
+      # secrets manager in production.
+      - OCR_PORT=8001
     env_file:
-      - ./ocr_service/.env
-    volumes:
-      - ./ocr_service:/app
+      - path: ./ocr_service/.env
+        required: false      # allow running without an .env file
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # ── Application: API ──────────────────────────────────────────────────────────
 
   api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    volumes:
-      - .:/app
-      - shared_data:/shared
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+      --timeout-keep-alive 75
     ports:
       - "8000:8000"
     environment:
-      # ── Infrastructure ───────────────────────────────────────────────────────
+      # ── Infrastructure ──────────────────────────────────────────────────────
       - POSTGRES_SERVER=db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=kyc_rag
       - REDIS_HOST=redis
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
-      # ── Embeddings & Reranking ───────────────────────────────────────────────
+      # ── Embeddings & Reranking ─────────────────────────────────────────────
       - EMBEDDING_MODEL_NAME=BAAI/bge-m3
       - RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3
       - SPARSE_EMBEDDING_MODEL_NAME=prithivida/Splade_PP_en_v1
       - EMBEDDING_BATCH_SIZE=256
       - QUERY_EMBEDDING_CACHE_TTL=60
       - RERANKER_TIMEOUT_S=3.0
-      # ── Ingestion ────────────────────────────────────────────────────────────
+      # ── Ingestion ──────────────────────────────────────────────────────────
       - MAX_FILE_SIZE_BYTES=52428800
       - CHUNK_SIZE=500
       - CHUNK_OVERLAP=50
@@ -81,7 +137,7 @@ services:
       - OCR_SERVICE_URL=http://ocr_service:8001/ocr
       - OCR_RETRY_ATTEMPTS=3
       - OCR_RETRY_WAIT_S=2.0
-      # ── Retrieval & Graph ────────────────────────────────────────────────────
+      # ── Retrieval & Graph ──────────────────────────────────────────────────
       - DETERMINISTIC_BYPASS_ENTITY_TYPES=PASSPORT_NUM,ORG,ADDRESS
       - RRF_K=60
       - RRF_DENSE_WEIGHT=0.7
@@ -90,10 +146,9 @@ services:
       - GRAPH_SEMANTIC_THRESHOLD=0.8
       - GRAPH_MAX_DEPTH=2
       - QUERY_CACHE_TTL=3600
-      # ── OCR Provider ─────────────────────────────────────────────────────────
+      # ── OCR Provider ───────────────────────────────────────────────────────
       - DEFAULT_OCR_PROVIDER=gpt4v
       - AZURE_FORM_RECOGNIZER_MODEL_ID=prebuilt-read
-      # AZURE_FORM_RECOGNIZER_ENDPOINT and AZURE_FORM_RECOGNIZER_KEY: set via .env for Azure OCR
     depends_on:
       db:
         condition: service_healthy
@@ -103,28 +158,46 @@ services:
         condition: service_healthy
       ocr_service:
         condition: service_started
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 6G
+        reservations:
+          cpus: "1"
+          memory: 4G
+
+  # ── Application: Celery Workers ───────────────────────────────────────────────
+  # Use --concurrency=4 so one compose service handles 4 parallel tasks.
+  # In production, scale horizontally via k8s worker Deployment replicas instead.
 
   worker:
     build: .
-    command: celery -A app.core.celery_app worker --loglevel=info -Q main-queue
-    volumes:
-      - .:/app
-      - shared_data:/shared
+    command: >
+      celery -A app.core.celery_app worker
+      --loglevel=info
+      -Q main-queue
+      --concurrency=4
+      --max-tasks-per-child=50
     environment:
-      # ── Infrastructure ───────────────────────────────────────────────────────
+      # ── Infrastructure ──────────────────────────────────────────────────────
       - POSTGRES_SERVER=db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=kyc_rag
       - REDIS_HOST=redis
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
-      # ── Embeddings & Reranking ───────────────────────────────────────────────
+      # ── Embeddings & Reranking ─────────────────────────────────────────────
       - EMBEDDING_MODEL_NAME=BAAI/bge-m3
       - RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3
       - SPARSE_EMBEDDING_MODEL_NAME=prithivida/Splade_PP_en_v1
       - EMBEDDING_BATCH_SIZE=256
       - QUERY_EMBEDDING_CACHE_TTL=60
       - RERANKER_TIMEOUT_S=3.0
-      # ── Ingestion ────────────────────────────────────────────────────────────
+      # ── Ingestion ──────────────────────────────────────────────────────────
       - MAX_FILE_SIZE_BYTES=52428800
       - CHUNK_SIZE=500
       - CHUNK_OVERLAP=50
@@ -133,7 +206,7 @@ services:
       - OCR_SERVICE_URL=http://ocr_service:8001/ocr
       - OCR_RETRY_ATTEMPTS=3
       - OCR_RETRY_WAIT_S=2.0
-      # ── Retrieval & Graph ────────────────────────────────────────────────────
+      # ── Retrieval & Graph ──────────────────────────────────────────────────
       - DETERMINISTIC_BYPASS_ENTITY_TYPES=PASSPORT_NUM,ORG,ADDRESS
       - RRF_K=60
       - RRF_DENSE_WEIGHT=0.7
@@ -142,10 +215,9 @@ services:
       - GRAPH_SEMANTIC_THRESHOLD=0.8
       - GRAPH_MAX_DEPTH=2
       - QUERY_CACHE_TTL=3600
-      # ── OCR Provider ─────────────────────────────────────────────────────────
+      # ── OCR Provider ───────────────────────────────────────────────────────
       - DEFAULT_OCR_PROVIDER=gpt4v
       - AZURE_FORM_RECOGNIZER_MODEL_ID=prebuilt-read
-      # AZURE_FORM_RECOGNIZER_ENDPOINT and AZURE_FORM_RECOGNIZER_KEY: set via .env for Azure OCR
     depends_on:
       db:
         condition: service_healthy
@@ -155,6 +227,17 @@ services:
         condition: service_healthy
       ocr_service:
         condition: service_started
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          cpus: "2"
+          memory: 4G
+
+  # ── Frontend ──────────────────────────────────────────────────────────────────
 
   frontend:
     build: ./frontend
@@ -167,15 +250,22 @@ services:
       - POSTGRES_SERVER=db
       - POSTGRES_PORT=5432
       - API_URL=http://api:8000/api/v1
-    volumes:
-      - shared_data:/shared
     depends_on:
       api:
         condition: service_started
       db:
         condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
 
 volumes:
+  db_data:
   redis_data:
-  shared_data:
   minio_data:

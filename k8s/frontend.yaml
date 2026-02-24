@@ -1,0 +1,137 @@
+# Frontend — Streamlit dashboard.
+# Exposed via an Ingress; direct DB + API access within the cluster.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: kyc-rag
+  labels:
+    app: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 8501
+      targetPort: 8501
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: kyc-rag
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/YOUR_ORG/kyc-rag-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8501
+          env:
+            - name: API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: API_URL
+            - name: POSTGRES_SERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: POSTGRES_SERVER
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: POSTGRES_PORT
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+---
+# Ingress — exposes the frontend externally.
+# Requires an Ingress controller (e.g. ingress-nginx, Traefik, AWS ALB controller).
+# Replace hosts with your actual domain; add tls block if using cert-manager.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kyc-rag-ingress
+  namespace: kyc-rag
+  annotations:
+    # nginx example; swap for your controller's annotations
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kyc-rag.example.com
+      http:
+        paths:
+          # Frontend (Streamlit)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 8501
+          # API — exposed under /api so the frontend can call it cross-origin
+          # or external clients can reach it directly.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8000
+  # Uncomment and configure cert-manager for TLS:
+  # tls:
+  #   - hosts:
+  #       - kyc-rag.example.com
+  #     secretName: kyc-rag-tls

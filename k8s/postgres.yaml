@@ -1,0 +1,101 @@
+# PostgreSQL with pgvector — StatefulSet for stable pod identity and ordered restart.
+# Uses a PersistentVolumeClaim so data survives pod restarts and node replacements.
+#
+# Resource allocation:
+#   shared_buffers ≈ 25 % of RAM limit → set POSTGRES_SHARED_BUFFERS=512MB for a 2Gi limit.
+#   For production pgvector workloads (HNSW index) bump limits to 4Gi/2CPU.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kyc-rag
+  labels:
+    app: postgres
+spec:
+  # Headless — StatefulSet pods are addressed as postgres-0.postgres.kyc-rag.svc
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: kyc-rag
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: ankane/pgvector:v0.5.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: kyc-rag-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: POSTGRES_PASSWORD
+            # Tune shared_buffers to ~25 % of memory limit
+            - name: POSTGRES_INITDB_ARGS
+              value: "--encoding=UTF8"
+          ports:
+            - containerPort: 5432
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # storageClassName: "fast-ssd"   # set to your cloud provider's SSD class
+        resources:
+          requests:
+            storage: 50Gi

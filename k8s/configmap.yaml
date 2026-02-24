@@ -1,0 +1,49 @@
+# Non-sensitive configuration shared by api and worker pods.
+# Sensitive values (passwords, API keys) live in secret.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kyc-rag-config
+  namespace: kyc-rag
+data:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  POSTGRES_SERVER: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "kyc_rag"
+  POSTGRES_USER: "postgres"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  MINIO_ENDPOINT: "minio:9000"
+  # ── Embeddings & Reranking ───────────────────────────────────────────────────
+  EMBEDDING_MODEL_NAME: "BAAI/bge-m3"
+  RERANKER_MODEL_NAME: "BAAI/bge-reranker-v2-m3"
+  SPARSE_EMBEDDING_MODEL_NAME: "prithivida/Splade_PP_en_v1"
+  EMBEDDING_BATCH_SIZE: "256"
+  QUERY_EMBEDDING_CACHE_TTL: "60"
+  RERANKER_TIMEOUT_S: "3.0"
+  # fastembed / HuggingFace model cache path (mounted as emptyDir in pods)
+  FASTEMBED_CACHE_PATH: "/model-cache/fastembed"
+  HF_HOME: "/model-cache/huggingface"
+  # ── Ingestion ────────────────────────────────────────────────────────────────
+  MAX_FILE_SIZE_BYTES: "52428800"
+  CHUNK_SIZE: "500"
+  CHUNK_OVERLAP: "50"
+  MIN_CHUNK_LENGTH: "50"
+  EXCEL_ROWS_PER_CHUNK: "20"
+  OCR_SERVICE_URL: "http://ocr-service:8001/ocr"
+  OCR_RETRY_ATTEMPTS: "3"
+  OCR_RETRY_WAIT_S: "2.0"
+  # ── Retrieval & Graph ────────────────────────────────────────────────────────
+  DETERMINISTIC_BYPASS_ENTITY_TYPES: "PASSPORT_NUM,ORG,ADDRESS"
+  RRF_K: "60"
+  RRF_DENSE_WEIGHT: "0.7"
+  RERANKER_CONFIDENCE_CUTOFF: "0.5"
+  GRAPH_FREQUENCY_THRESHOLD: "2"
+  GRAPH_SEMANTIC_THRESHOLD: "0.8"
+  GRAPH_MAX_DEPTH: "2"
+  QUERY_CACHE_TTL: "3600"
+  # ── OCR Provider ─────────────────────────────────────────────────────────────
+  DEFAULT_OCR_PROVIDER: "gpt4v"
+  AZURE_FORM_RECOGNIZER_MODEL_ID: "prebuilt-read"
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+  API_URL: "http://api:8000/api/v1"

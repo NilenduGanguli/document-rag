@@ -20,6 +20,7 @@ import re
 from typing import List, Dict, Any
 
 import spacy
+import spacy.cli  # must be at module level to avoid UnboundLocalError in _load_spacy
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,6 @@ def _load_spacy():
         except OSError:
             continue
     # Last resort: download the small model
-    import spacy.cli
     spacy.cli.download("en_core_web_sm")
     return spacy.load("en_core_web_sm")
 

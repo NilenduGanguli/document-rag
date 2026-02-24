@@ -1,0 +1,82 @@
+# OCR Service — wraps GPT-4V / Azure Form Recognizer for document OCR.
+# Stateless; scales horizontally.  API and worker pods call it at
+# http://ocr-service:8001/ocr.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocr-service
+  namespace: kyc-rag
+  labels:
+    app: ocr-service
+spec:
+  selector:
+    app: ocr-service
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-service
+  namespace: kyc-rag
+  labels:
+    app: ocr-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ocr-service
+  template:
+    metadata:
+      labels:
+        app: ocr-service
+    spec:
+      containers:
+        - name: ocr-service
+          # Image built from ./ocr_service by CI/CD
+          image: ghcr.io/YOUR_ORG/kyc-rag-ocr:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8001
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: OPENAI_API_KEY
+            - name: AZURE_FORM_RECOGNIZER_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: AZURE_FORM_RECOGNIZER_ENDPOINT
+            - name: AZURE_FORM_RECOGNIZER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kyc-rag-secrets
+                  key: AZURE_FORM_RECOGNIZER_KEY
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

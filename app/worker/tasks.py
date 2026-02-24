@@ -395,7 +395,7 @@ def process_kyc_document_task(self, doc_id: str, storage_uri: str, directives: O
 
         # ── Layout analysis ───────────────────────────────────────────────────
 
-        if raw_doc.file_type in (FileType.PNG, FileType.JPEG):
+        if raw_doc.file_type in (FileType.PNG, FileType.JPEG, FileType.TIFF):
             text = _ocr_image(local_path, ocr_provider)
             layout_segments.append({
                 "type": "Image",
@@ -573,7 +573,7 @@ def _build_same_address_edges(
                     "source_node": chunk_ids[i],
                     "target_node": chunk_ids[j],
                     "relationship_type": RelationshipType.SAME_ADDRESS,
-                    "metadata": {"normalized_address": addr},
+                    "edge_metadata": {"normalized_address": addr},
                 })
     return edges
 
@@ -619,7 +619,7 @@ def _build_contradicts_edges(
                         "source_node": chunk_ids[i],
                         "target_node": chunk_ids[j],
                         "relationship_type": RelationshipType.CONTRADICTS,
-                        "metadata": {
+                        "edge_metadata": {
                             "entity": person_val,
                             "dates_a": list(dates_i),
                             "dates_b": list(dates_j),
@@ -658,7 +658,7 @@ def _build_ubo_edges(
                 "source_node": org_ent["chunk_id"],
                 "target_node": ubo_ent["chunk_id"],
                 "relationship_type": RelationshipType.REFERENCES_UBO,
-                "metadata": {
+                "edge_metadata": {
                     "ubo_value": ubo_ent["entity_value"],
                     "org_value": org_ent["entity_value"],
                 },
@@ -733,7 +733,7 @@ def batch_embed_and_store(
                 "source_node": chunk_id,
                 "target_node": segment_id,
                 "relationship_type": RelationshipType.CHILD_OF,
-                "metadata": None,
+                "edge_metadata": None,
             })
 
         # ── Graph edges derived from entity relationships ─────────────────────

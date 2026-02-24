@@ -1,0 +1,15 @@
+# Apply everything with: kubectl apply -k k8s/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kyc-rag
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres.yaml
+  - redis.yaml
+  - minio.yaml
+  - ocr-service.yaml
+  - api.yaml
+  - worker.yaml
+  - frontend.yaml

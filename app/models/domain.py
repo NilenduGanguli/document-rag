@@ -14,6 +14,7 @@ class FileType(str, enum.Enum):
     PDF = "PDF"
     PNG = "PNG"
     JPEG = "JPEG"
+    TIFF = "TIFF"
     DOCX = "DOCX"
     XLSX = "XLSX"
 
@@ -170,7 +171,7 @@ class KnowledgeGraphEdge(Base):
     target_node = Column(UUID(as_uuid=True), index=True, nullable=False)
     relationship_type = Column(Enum(RelationshipType), nullable=False)
     # Optional payload (e.g., contradiction details, address match score)
-    metadata = Column(JSONB, nullable=True)
+    edge_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 

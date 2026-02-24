@@ -8,7 +8,7 @@ pgvector==0.2.5
 pydantic==2.6.3
 pydantic-settings==2.2.1
 
-# NLP — en_core_web_lg downloaded in Dockerfile via: python -m spacy download en_core_web_lg
+# NLP — en_core_web_sm installed in Dockerfile via direct wheel URL (pip install https://...)
 spacy==3.7.4
 gliner==0.2.7
 
@@ -17,10 +17,41 @@ sentence-transformers>=3.0.0
 fastembed==0.3.1
 
 # Document Parsing
+# ----------------------------------------------------------------------------
+# CONFLICT NOTE — three packages below are installed in the Dockerfile via a
+# separate RUN step and must NOT be moved into this file:
+#
+#   unstructured-inference==0.7.23
+#     Pins onnxruntime<1.16, which conflicts with fastembed/gliner (>=1.17).
+#     Installed with --no-deps in the Dockerfile so the higher onnxruntime wins.
+#
+#   layoutparser==0.3.4
+#     Transitively upgrades numpy to 2.x, breaking thinc (spaCy) and fastembed.
+#     Installed in the Dockerfile followed by a force-reinstall of numpy<2.
+#
+#   pdfplumber>=0.6.0,<0.7
+#     pdfplumber 0.6.x requires pdfminer.six>=20220319, which conflicts with the
+#     pdfminer.six==20211012 pin below.  Installed in the Dockerfile after the
+#     main requirements step so it upgrades pdfminer.six in a controlled way.
+# ----------------------------------------------------------------------------
 unstructured==0.12.5
-unstructured[pdf]==0.12.5
-pdfminer.six==20221105
+pdfminer.six==20211012
 python-docx==1.1.0
+matplotlib==3.8.4              # required by unstructured-inference at import time
+opencv-python-headless!=4.7.0.68
+timm                           # TableTransformerConvEncoder (table extraction in PDFs)
+
+# numpy must be <2.0.0: thinc (spaCy) and fastembed both require it.
+# layoutparser (Dockerfile step) can upgrade numpy to 2.x; pinning here
+# ensures local installs and the Dockerfile force-reinstall both land on <2.
+numpy>=1.21,<2.0.0
+
+# PDF extras (previously pulled in by unstructured[pdf]):
+pdf2image>=1.16.0
+pikepdf>=8.0.0
+pillow-heif>=0.10.0
+pypdf>=3.0.0
+unstructured.pytesseract>=0.3.12
 
 # Resilience & Validation
 tenacity==8.3.0
